@@ -11,7 +11,7 @@ from html import escape
 
 from ..app import Platform
 
-PAGE_PATHS: tuple[str, ...] = ("/", "/receiver", "/salt", "/alarms")
+PAGE_PATHS: tuple[str, ...] = ("/", "/receiver", "/salt", "/steam", "/alarms")
 
 _STYLE = """
 body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 0; background: #0f1720; color: #e6edf3; }
@@ -45,6 +45,7 @@ def _shell(title: str, body: str) -> str:
             ("/", "镜场"),
             ("/receiver", "吸热器"),
             ("/salt", "熔盐"),
+            ("/steam", "蒸汽"),
             ("/alarms", "告警"),
         )
     )
@@ -122,6 +123,75 @@ def _salt_page(platform: Platform) -> str:
     return _shell("熔盐控制台", _table("熔盐回路", rows))
 
 
+def _steam_page(platform: Platform) -> str:
+    """蒸汽页：压力带、旁路依据与每轮前馈／反馈判定（可逐轮复盘）。"""
+
+    status = platform.status()
+    steam = status["steam"]
+    ff = status["feedforward"]
+    basis = {
+        "none": "无需旁路",
+        "power_feedforward": "前馈抢先（甩负荷富余）",
+        "pressure_error": "压力偏差（反馈兜底）",
+    }.get(ff["bypass_basis"], ff["bypass_basis"])
+    rows = [
+        ("主蒸汽压力 (MPa)", steam["pressure_mpa"]),
+        ("目标 / 允许带 (MPa)", f"{steam['target_mpa']} ± {steam['band_mpa']}"),
+        ("压力是否入带", "是" if steam["settled"] else "否"),
+        ("历史峰值 (MPa)", steam["peak_mpa"]),
+        ("产汽量 (kg/s)", steam["production_kg_s"]),
+        ("当前 / 目标负荷 (MW)", f"{steam['load_mw']} / {steam['target_mw']}"),
+        ("主汽门", "开" if steam["main_stop_open"] else "关"),
+        ("旁路阀", "开" if steam["bypass"]["open"] else "关"),
+        ("旁路累计开 / 关次数", f"{steam['bypass']['opens']} / {steam['bypass']['closes']}"),
+        ("前馈测点", "在挂" if ff["enabled"] else "已摘除"),
+        ("前馈信号", "有效" if ff["signal_available"] else "缺失/过期（退回反馈）"),
+        ("前馈功率 (kW)", ff["power_kw"]),
+        ("信号年龄 (s)", ff["signal_age_s"] if ff["signal_age_s"] is not None else "-"),
+        ("旁路当前依据", basis),
+        ("累计判定轮次", ff["decisions"]),
+    ]
+    body = _shell("蒸汽控制台", _table("蒸汽与旁路状态", rows))
+
+    last = ff["last"]
+    if last is not None:
+        decision_rows = [
+            ("轮次", last["seq"]),
+            ("调节模式", "前馈" if last["regime"] == "feedforward" else "反馈（部分失败）"),
+            ("旁路动作 / 依据", f"{last['bypass_action']} / {last['bypass_basis_text']}"),
+            ("压力偏差 (MPa)", last["pressure_error_mpa"]),
+            ("预测产汽富余 (kg/s)", last["predicted_surplus_kg_s"]),
+            ("调度 / 执行负荷 (MW)", f"{last['dispatch_target_mw']} / {last['load_target_mw']}"),
+            ("是否抢先压负荷", "是" if last["load_preemptive"] else "否"),
+            ("原因代码", ", ".join(last["reasons"]) or "-"),
+        ]
+        body += _table("最近一轮判定（审计同口径）", decision_rows)
+
+    history = platform.steam_decisions(limit=12)
+    head = ("轮次", "模式", "旁路动作", "旁路依据", "富余 kg/s", "偏差 MPa", "抢先压负荷", "原因")
+    table_rows = "".join(
+        "<tr>"
+        + "".join(f"<td>{escape(str(value))}</td>" for value in (
+            item["seq"],
+            "前馈" if item["regime"] == "feedforward" else "反馈",
+            item["bypass_action"],
+            item["bypass_basis"],
+            item["predicted_surplus_kg_s"],
+            item["pressure_error_mpa"],
+            "是" if item["load_preemptive"] else "否",
+            ", ".join(item["reasons"]),
+        ))
+        + "</tr>"
+        for item in reversed(history)
+    )
+    body += (
+        "<h2>逐轮判定（最近 12 轮，新的在上）</h2>"
+        f"<table><tr>{''.join(f'<th>{escape(col)}</th>' for col in head)}</tr>"
+        f"{table_rows}</table>"
+    )
+    return body
+
+
 def _alarm_page(platform: Platform) -> str:
     """告警页：闩锁、历史与升级等级。"""
 
@@ -151,6 +221,7 @@ _RENDERERS = {
     "/": _mirror_page,
     "/receiver": _receiver_page,
     "/salt": _salt_page,
+    "/steam": _steam_page,
     "/alarms": _alarm_page,
 }
 

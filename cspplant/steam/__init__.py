@@ -8,14 +8,33 @@
 from __future__ import annotations
 
 from .bypass import BypassValve
+from .feedforward import (
+    BASIS_NONE,
+    BASIS_POWER_FEEDFORWARD,
+    BASIS_PRESSURE_ERROR,
+    REGIME_FEEDBACK,
+    REGIME_FEEDFORWARD,
+    FeedforwardController,
+    PowerSignal,
+    SteamDecision,
+)
 from .pressure import SteamPressure
 from .snapshot import SteamSnapshot
-from .system import STEAM_ENTHALPY_KJ_KG, SteamSystem
+from .system import BYPASS_CAPACITY_KG_S, STEAM_ENTHALPY_KJ_KG, SteamSystem
 from .turbine import Turbine, TurbineReport
 from .turbine_load import LoadRamp
 
 __all__ = [
+    "BYPASS_CAPACITY_KG_S",
+    "BASIS_NONE",
+    "BASIS_POWER_FEEDFORWARD",
+    "BASIS_PRESSURE_ERROR",
+    "REGIME_FEEDBACK",
+    "REGIME_FEEDFORWARD",
     "BypassValve",
+    "FeedforwardController",
+    "PowerSignal",
+    "SteamDecision",
     "SteamPressure",
     "SteamSnapshot",
     "SteamSystem",

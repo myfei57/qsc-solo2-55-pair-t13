@@ -48,7 +48,9 @@
       "pressure_band_mpa": 0.8,
       "bypass_lead_s": 6.0,
       "load_max_mw": 30.0,
-      "load_rate_mw_s": 1.0
+      "load_rate_mw_s": 1.0,
+      "feedforward_stale_s": 10.0,
+      "feedforward_min_surplus_kg_s": 2.0
     },
     "wash": {
       "wash_duration_s": 90.0,

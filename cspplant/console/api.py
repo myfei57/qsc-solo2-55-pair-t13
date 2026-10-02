@@ -53,6 +53,8 @@ class Api:
         add("GET", "/api/alarms", self._alarms)
         add("GET", "/api/timeline", self._timeline)
         add("GET", "/api/journal", self._journal)
+        add("GET", "/api/steam/decisions", self._steam_decisions)
+        add("POST", "/api/feedforward", self._feedforward)
         add("GET", "/api/store", self._store)
         add("GET", "/api/readiness", self._readiness)
         add("GET", "/api/window", lambda params, body: {"mirrors": self._platform.mirrors_in_window()})
@@ -276,3 +278,11 @@ class Api:
         if kind == "salt":
             return self._platform.disturb_salt(_as_float(body, "value", 0.2))
         return self._platform.disturb_steam(_as_float(body, "value", 0.0))
+
+    def _steam_decisions(self, params: dict, body: dict) -> dict:
+        limit = int(params.get("limit", 32))
+        return {"decisions": self._platform.steam_decisions(limit)}
+
+    def _feedforward(self, params: dict, body: dict) -> dict:
+        enabled = bool(body.get("enabled", True))
+        return self._platform.set_feedforward(enabled)

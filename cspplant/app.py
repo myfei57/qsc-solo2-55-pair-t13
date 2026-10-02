@@ -52,6 +52,7 @@ from .sequence import (
     wash_mirrors,
 )
 from .steam.bypass import BypassValve
+from .steam.feedforward import FeedforwardController, PowerSignal
 from .steam.pressure import SteamPressure
 from .steam.system import SteamSystem
 from .steam.turbine import Turbine
@@ -152,12 +153,23 @@ class Platform:
 
         bypass = BypassValve(self.config.steam)
         ramp = LoadRamp(self.config.steam)
+        self.power_signal = PowerSignal(self.config.steam.feedforward_stale_s)
+        self.feedforward = FeedforwardController(
+            pressure_target_mpa=self.config.steam.pressure_target_mpa,
+            pressure_band_mpa=self.config.steam.pressure_band_mpa,
+            load_max_mw=self.config.steam.load_max_mw,
+            load_rate_mw_s=self.config.steam.load_rate_mw_s,
+            bypass_lead_s=self.config.steam.bypass_lead_s,
+            min_surplus_kg_s=self.config.steam.feedforward_min_surplus_kg_s,
+        )
         self.steam = SteamSystem(
             self.config.steam,
             SteamPressure(self.config.steam),
             ramp,
             bypass,
             Turbine(self.config.steam, ramp, bypass),
+            power_signal=self.power_signal,
+            controller=self.feedforward,
         )
 
         self.sun_model = SunModel()
@@ -548,6 +560,69 @@ class Platform:
         with self._lock:
             return self.steam.disturb(delta_mpa)
 
+    def set_feedforward(self, enabled: bool) -> dict:
+        """挂上／摘掉吸热器热功率前馈测点。
+
+        摘掉属于部分失败：下一轮起蒸汽侧自动退回纯反馈调节，不影响在运负荷。
+        """
+
+        with self._lock:
+            enabled = bool(enabled)
+            now = self.clock.now()
+            self.power_signal.set_enabled(enabled)
+            self.bus.publish(
+                Event.of(
+                    "steam",
+                    "steam",
+                    "feedforward_signal_attached" if enabled else "feedforward_signal_lost",
+                    asset="turbine",
+                    severity="notice" if enabled else "warning",
+                    message="吸热器功率前馈已挂上" if enabled else "吸热器功率前馈缺失，退回反馈调节",
+                    enabled=enabled,
+                )
+            )
+            return {
+                "enabled": enabled,
+                "signal_available": self.power_signal.available(now),
+                "dropouts": self.power_signal.dropouts(),
+            }
+
+    def steam_decisions(self, limit: int = 32) -> list[dict]:
+        """返回最近每轮的蒸汽侧判定，供控制台逐轮复盘。"""
+
+        return self.feedforward.history(limit=limit)
+
+    def _record_steam_decision(self, decision) -> None:
+        """把本轮蒸汽判定原样落审计：决策、控制台、审计三处口径一致。"""
+
+        if decision is None:
+            return
+        payload = decision.as_dict()
+        severity = "warning" if decision.partial_failure else "notice"
+        if decision.opens_bypass():
+            message = f"旁路开阀：{decision.basis_text}"
+        elif decision.bypass_action == "close":
+            message = "旁路关阀：开阀依据已消除"
+        elif decision.load_preemptive:
+            message = "前馈抢先压负荷，把压力兜在偏差之前"
+        elif decision.partial_failure:
+            message = "前馈信号缺失，退回反馈调节"
+        else:
+            message = "蒸汽侧维持，旁路与负荷不动作"
+        # action 是审计检索键，固定为 steam_control_decision；具体依据在
+        # payload.regime / bypass_basis / reasons 里逐轮可查。
+        self.bus.publish(
+            Event.of(
+                "steam",
+                "steam",
+                "steam_control_decision",
+                asset="turbine",
+                severity=severity,
+                message=message,
+                **payload,
+            )
+        )
+
     def disturb_salt(self, heat_fraction: float) -> dict:
         """注入一次熔盐热负荷扰动。"""
 
@@ -581,8 +656,13 @@ class Platform:
                     "skipped": "not_admitted",
                 }
             load_target_mw = self.config.steam.load_max_mw * dispatch_pct / 100.0
-            self.steam.track_load(load_target_mw)
-            steam_report = self.steam.update(power_kw, dt)
+            # 先喂前馈采样，再让蒸汽侧判定：这一轮吸热器若没出数，信号即按
+            # 过期处理，下一轮自动退回反馈，不影响压力模型照常推进。
+            self.power_signal.ingest(power_kw, moment)
+            steam_report, steam_decision = self.steam.control_cycle(
+                power_kw, load_target_mw, moment, dt
+            )
+            self._record_steam_decision(steam_decision)
             alarms = self._evaluate_alarms(moment)
             self.trend.append("receiver_temperature", moment, self.receiver.output_temperature_c())
             self.trend.append("salt_flow_kg_s", moment, self.salt.flow_kg_s())
@@ -750,6 +830,24 @@ class Platform:
             "salt": self.salt.status(),
             "steam": self.steam.status(),
             "steam_pressure_updates": self.steam.pressure.updates(),
+            "feedforward": {
+                "enabled": self.power_signal.enabled(),
+                "signal_available": self.power_signal.available(self.clock.now()),
+                "power_kw": round(self.power_signal.current_kw(), 3),
+                "signal_age_s": (
+                    None
+                    if self.power_signal.age_s(self.clock.now()) is None
+                    else round(self.power_signal.age_s(self.clock.now()), 3)
+                ),
+                "dropouts": self.power_signal.dropouts(),
+                "decisions": self.feedforward.seq,
+                "bypass_basis": self.feedforward.basis,
+                "last": (
+                    None
+                    if self.feedforward.last() is None
+                    else self.feedforward.last().as_dict()
+                ),
+            },
             "bypass_held_open_s": round(self.steam.bypass.held_open_s(self.clock.now()), 3),
             "wash": self.truck.snapshot(),
             "drain": {

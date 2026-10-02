@@ -11,6 +11,15 @@ import threading
 
 from ..config import SteamLimits
 from .bypass import BypassValve
+from .feedforward import (
+    ACTION_CLOSE,
+    ACTION_OPEN,
+    BASIS_POWER_FEEDFORWARD,
+    FeedforwardController,
+    PowerSignal,
+    SteamDecision,
+    TURBINE_KG_S_PER_MW,
+)
 from .pressure import SteamPressure
 from .snapshot import SteamSnapshot
 from .turbine import Turbine, TurbineReport
@@ -18,9 +27,6 @@ from .turbine_load import LoadRamp
 
 # 产汽焓差（kJ/kg），把吸热器热功率换算成蒸汽流量。
 STEAM_ENTHALPY_KJ_KG = 2600.0
-
-# 汽机负荷到进汽量的换算（kg/s per MW）。
-TURBINE_KG_S_PER_MW = 0.33
 
 # 旁路通流能力（kg/s）。
 BYPASS_CAPACITY_KG_S = 40.0
@@ -39,13 +45,18 @@ class SteamSystem:
         ramp: LoadRamp,
         bypass: BypassValve,
         turbine: Turbine,
+        power_signal: PowerSignal | None = None,
+        controller: FeedforwardController | None = None,
     ) -> None:
         self._limits = limits
         self._pressure = pressure
         self._ramp = ramp
         self._bypass = bypass
         self._turbine = turbine
+        self._signal = power_signal
+        self._controller = controller
         self._production = 0.0
+        self._last_decision: SteamDecision | None = None
         self._lock = threading.RLock()
 
     @property
@@ -68,6 +79,21 @@ class SteamSystem:
     def turbine(self) -> Turbine:
         return self._turbine
 
+    @property
+    def power_signal(self) -> PowerSignal | None:
+        """吸热器热功率前馈信号（装配了前馈才有）。"""
+
+        return self._signal
+
+    @property
+    def controller(self) -> FeedforwardController | None:
+        return self._controller
+
+    def last_decision(self) -> SteamDecision | None:
+        """最近一轮前馈／反馈判定，供控制台与审计核对。"""
+
+        return self._last_decision
+
     def production_kg_s(self) -> float:
         """返回最近一次换算得到的产汽量。"""
 
@@ -84,6 +110,79 @@ class SteamSystem:
         if not self._bypass.is_open():
             return 0.0
         return max(0.0, min(BYPASS_CAPACITY_KG_S, float(surplus_kg_s)))
+
+    def control_cycle(
+        self,
+        thermal_power_kw: float,
+        dispatch_target_mw: float,
+        now: float,
+        dt: float,
+    ) -> tuple[dict, SteamDecision]:
+        """前馈控制周期：判定 → 执行旁路／负荷 → 推进压力。
+
+        与 :meth:`update` 的区别是，这里在压力偏差产生**之前**先吃吸热器热
+        功率前馈：信号有效时按工况抢先开旁路或抢先压负荷；信号缺失属于部分
+        失败，自动退回 :meth:`update` 原来的纯反馈逻辑。控制器始终不碰主汽
+        门，甩负荷／跳机时的"先开旁路、后关主汽门"仍只由
+        :class:`~cspplant.steam.turbine.Turbine` 编排。
+
+        返回 ``(推进报告, 本轮判定)``；同一份判定既给控制台也落审计。
+        """
+
+        if dt <= 0:
+            raise ValueError("步长必须为正")
+        if self._controller is None or self._signal is None:
+            return self.update(thermal_power_kw, dt), None  # type: ignore[return-value]
+        with self._lock:
+            # 前馈采样由平台控制循环喂入：某轮吸热器没出数，信号就自然过期，
+            # 这里不能拿当轮功率顺手刷新，否则"信号缺失"永远观测不到。
+            production = max(0.0, float(thermal_power_kw)) / STEAM_ENTHALPY_KJ_KG
+            self._production = production
+            decision = self._controller.decide(
+                now=now,
+                signal=self._signal,
+                pressure_mpa=self._pressure.value_mpa(),
+                production_kg_s=production,
+                current_load_mw=self._ramp.current_mw(),
+                dispatch_target_mw=dispatch_target_mw,
+                bypass_open=self._bypass.is_open(),
+            )
+            # 旁路先动。判定说开就开、说关就关；重复开／关会被旁路阀联锁拒绝，
+            # 这里只对 hold 之外的动作下发一次。
+            if decision.bypass_action == ACTION_OPEN and not self._bypass.is_open():
+                self._bypass.open(now)
+            elif decision.bypass_action == ACTION_CLOSE and self._bypass.is_open():
+                self._bypass.close()
+
+            # 负荷按本轮判定的目标推进；前馈抢压时目标低于调度，信号缺失时
+            # 退回只跟调度的原行为。
+            target = max(0.0, min(self._limits.load_max_mw, float(decision.load_target_mw)))
+            if target > 0.0 and not self._turbine.main_stop_open() and not self._bypass.is_open():
+                self._turbine.open_main_stop()
+            self._ramp.request(target)
+            self._ramp.step(dt)
+
+            # 压力偏差修正始终保留：前馈负责抢先，反馈负责收尾，两者不互斥。
+            error = self._pressure.value_mpa() - self._limits.pressure_target_mpa
+            to_turbine = max(
+                0.0,
+                self.draw_kg_s(self._ramp.current_mw())
+                + error * PRESSURE_CONTROL_GAIN_KG_S_PER_MPA,
+            )
+            surplus = production - to_turbine
+            to_bypass = self.bypass_draw_kg_s(surplus)
+            pressure = self._pressure.update(production, to_turbine, to_bypass, dt)
+            self._last_decision = decision
+            report = {
+                "production_kg_s": round(production, 3),
+                "to_turbine_kg_s": round(to_turbine, 3),
+                "to_bypass_kg_s": round(to_bypass, 3),
+                "pressure_mpa": round(pressure, 3),
+                "settled": self._pressure.settled(),
+                "exceedances": self._pressure.exceedances(),
+                "control": decision.as_dict(),
+            }
+            return report, decision
 
     def update(self, thermal_power_kw: float, dt: float) -> dict:
         """推进一个步长：产汽 → 进汽／旁路 → 压力。"""
@@ -115,20 +214,6 @@ class SteamSystem:
 
         with self._lock:
             return self._turbine.raise_load(mw)
-
-    def track_load(self, mw: float) -> float:
-        """把控制循环算出的目标负荷交给斜率器，并按需打开主汽门。
-
-        与 :meth:`load` 的区别是这里只登记目标、由每个周期逐步推进，用于负荷
-        指令随调度连续变化的常规运行。
-        """
-
-        with self._lock:
-            target = max(0.0, min(self._limits.load_max_mw, float(mw)))
-            if target > 0.0 and not self._turbine.main_stop_open() and not self._bypass.is_open():
-                self._turbine.open_main_stop()
-            self._ramp.request(target)
-            return target
 
     def shed(self, target_mw: float, now: float) -> TurbineReport:
         """甩负荷（先开旁路、再关主汽门）。"""
@@ -171,6 +256,7 @@ class SteamSystem:
             "bypass": self._bypass.as_dict(),
             "sheds": self._turbine.sheds(),
             "trips": self._turbine.trips(),
+            "control": None if self.last_decision() is None else self.last_decision().as_dict(),
         }
 
     def snapshot(self) -> SteamSnapshot:

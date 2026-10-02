@@ -228,6 +228,8 @@ class SteamLimits:
     bypass_lead_s: float
     load_max_mw: float
     load_rate_mw_s: float
+    feedforward_stale_s: float
+    feedforward_min_surplus_kg_s: float
 
     @classmethod
     def from_mapping(cls, section: Mapping[str, Any]) -> "SteamLimits":
@@ -237,6 +239,10 @@ class SteamLimits:
             bypass_lead_s=_number(section, "bypass_lead_s", minimum=0.0),
             load_max_mw=_number(section, "load_max_mw", minimum=1.0),
             load_rate_mw_s=_number(section, "load_rate_mw_s", minimum=0.01),
+            feedforward_stale_s=_number(section, "feedforward_stale_s", minimum=1.0),
+            feedforward_min_surplus_kg_s=_number(
+                section, "feedforward_min_surplus_kg_s", minimum=0.0
+            ),
         )
 
     def settled(self, pressure_mpa: float) -> bool:
@@ -348,7 +354,7 @@ def default_config() -> PlatformConfig:
         field=FieldLimits(320.0, 6.0, 12, 6.0),
         receiver=ReceiverLimits(600.0, 620.0, 720.0, 42.0, 20.0, 8.0, 22.0),
         salt=SaltLimits(18.0, 96.0, 1.4, 15.0, 58.0, 9.0, 2.5, 3.4),
-        steam=SteamLimits(12.0, 0.8, 6.0, 30.0, 1.0),
+        steam=SteamLimits(12.0, 0.8, 6.0, 30.0, 1.0, 10.0, 2.0),
         wash=WashLimits(90.0, 26.0, 4.0, 9.0),
         alarm=AlarmLimits(5.0, 120.0),
     )
@@ -405,6 +411,8 @@ def config_to_mapping(cfg: PlatformConfig) -> dict:
                 "bypass_lead_s": cfg.steam.bypass_lead_s,
                 "load_max_mw": cfg.steam.load_max_mw,
                 "load_rate_mw_s": cfg.steam.load_rate_mw_s,
+                "feedforward_stale_s": cfg.steam.feedforward_stale_s,
+                "feedforward_min_surplus_kg_s": cfg.steam.feedforward_min_surplus_kg_s,
             },
             "wash": {
                 "wash_duration_s": cfg.wash.wash_duration_s,
