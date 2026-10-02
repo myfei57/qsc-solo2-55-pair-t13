@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from ..config import SteamLimits
+from ..errors import InterlockError
 from .bypass import BypassValve
 from .turbine_load import LoadRamp
 
@@ -69,8 +70,16 @@ class Turbine:
         return self._main_stop_open
 
     def close_main_stop(self) -> bool:
-        """关闭主汽门（旁路必须先开，顺序由甩负荷编排保证）。"""
+        """关闭主汽门。
 
+        硬性联锁：旁路未开就拒绝。任何路径（甩负荷、跳机、前馈优化）都不允许
+        绕过"旁路先开、主汽门后关"这个顺序，顺序编排在这里再被兜一次底。
+        """
+
+        if not self._bypass.is_open():
+            raise InterlockError(
+                "旁路未开，禁止关闭主汽门（旁路必须先开）", component="steam"
+            )
         self._main_stop_open = False
         return self._main_stop_open
 
@@ -133,7 +142,7 @@ class Turbine:
             if not self._bypass.is_open():
                 violations.append("bypass_not_open_before_main_stop")
             else:
-                self._main_stop_open = False
+                self.close_main_stop()
                 steps.append(
                     {
                         "component": "steam",
@@ -156,7 +165,7 @@ class Turbine:
             self._bypass.open(now)
         steps.append({"component": "steam", "action": "open_bypass", "detail": {"open": True}})
         if self._bypass.is_open():
-            self._main_stop_open = False
+            self.close_main_stop()
             self._ramp.request(0.0)
             self._ramp.settle(1.0, MAX_STEPS)
             steps.append(

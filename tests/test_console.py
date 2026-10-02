@@ -100,7 +100,7 @@ def test_pages_render_for_every_path(platform):
         html = render_page(path, platform)
         assert html is not None
         assert html.startswith("<!doctype html>")
-        assert "镜场控制台" in html or "吸热器控制台" in html or "熔盐控制台" in html or "告警控制台" in html
+        assert "镜场控制台" in html or "吸热器控制台" in html or "熔盐控制台" in html or "蒸汽控制台" in html or "告警控制台" in html
     assert render_page("/nope", platform) is None
 
 

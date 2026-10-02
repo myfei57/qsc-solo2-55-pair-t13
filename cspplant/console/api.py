@@ -71,6 +71,7 @@ class Api:
         add("POST", "/api/reset", self._reset)
         add("POST", "/api/concurrency", self._concurrency)
         add("POST", "/api/disturb", self._disturb)
+        add("POST", "/api/feedforward", self._feedforward)
         add("POST", "/api/plant/reset-state", lambda params, body: {"removed": self._platform.reset_state()})
 
     def routes(self) -> list[dict]:
@@ -276,3 +277,13 @@ class Api:
         if kind == "salt":
             return self._platform.disturb_salt(_as_float(body, "value", 0.2))
         return self._platform.disturb_steam(_as_float(body, "value", 0.0))
+
+    def _feedforward(self, params: dict, body: dict) -> dict:
+        raw = body.get("available", True)
+        if isinstance(raw, str):
+            if raw.lower() not in ("true", "false"):
+                raise PlantError("参数 'available' 必须是布尔值", component="console")
+            value = raw.lower() == "true"
+        else:
+            value = bool(raw)
+        return self._platform.set_feedforward_available(value)

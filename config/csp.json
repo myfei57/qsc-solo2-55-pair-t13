@@ -48,7 +48,13 @@
       "pressure_band_mpa": 0.8,
       "bypass_lead_s": 6.0,
       "load_max_mw": 30.0,
-      "load_rate_mw_s": 1.0
+      "load_rate_mw_s": 1.0,
+      "ff_power_lead_s": 8.0,
+      "ff_min_delta_kw": 6000.0,
+      "ff_release_delta_kw": 2500.0,
+      "ff_signal_max_age_s": 120.0,
+      "ff_bypass_open_band": 2.0,
+      "ff_bypass_close_band": 0.5
     },
     "wash": {
       "wash_duration_s": 90.0,

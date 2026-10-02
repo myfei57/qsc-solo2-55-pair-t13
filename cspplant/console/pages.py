@@ -11,7 +11,7 @@ from html import escape
 
 from ..app import Platform
 
-PAGE_PATHS: tuple[str, ...] = ("/", "/receiver", "/salt", "/alarms")
+PAGE_PATHS: tuple[str, ...] = ("/", "/receiver", "/salt", "/steam", "/alarms")
 
 _STYLE = """
 body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 0; background: #0f1720; color: #e6edf3; }
@@ -45,6 +45,7 @@ def _shell(title: str, body: str) -> str:
             ("/", "镜场"),
             ("/receiver", "吸热器"),
             ("/salt", "熔盐"),
+            ("/steam", "蒸汽"),
             ("/alarms", "告警"),
         )
     )
@@ -122,6 +123,52 @@ def _salt_page(platform: Platform) -> str:
     return _shell("熔盐控制台", _table("熔盐回路", rows))
 
 
+def _steam_page(platform: Platform) -> str:
+    """蒸汽页：压力、旁路／主汽门，以及最近一轮前馈／反馈决策的完整依据。"""
+
+    steam = platform.status()["steam"]
+    rows = [
+        ("主蒸汽压力 (MPa)", f"{steam['pressure_mpa']}（目标 {steam['target_mpa']} ± {steam['band_mpa']}）"),
+        ("压力是否在带", "是" if steam["settled"] else "否"),
+        ("历史峰值 (MPa)", steam["peak_mpa"]),
+        ("当前 / 目标负荷 (MW)", f"{steam['load_mw']} / {steam['target_mw']}"),
+        ("旁路阀", "开启" if steam["bypass"]["open"] else "关闭"),
+        ("旁路累计开 / 关", f"{steam['bypass']['opens']} / {steam['bypass']['closes']}"),
+        ("主汽门", "开启" if steam["main_stop_open"] else "关闭"),
+        ("甩负荷 / 跳机次数", f"{steam['sheds']} / {steam['trips']}"),
+        ("前馈信号", "在线" if steam["ff_signal_available"] else "缺失（已退回反馈）"),
+        ("前馈抢先开旁路次数", steam["ff_preemptive_opens"]),
+        ("信号缺失轮数", steam["ff_missing"]),
+    ]
+    body = _table("蒸汽系统", rows)
+
+    decision = steam.get("last_decision")
+    if decision is None:
+        body += _table("最近控制决策", [("状态", "尚未运行控制周期")])
+    else:
+        mode_text = "前馈（抢先）" if decision["mode"] == "feedforward" else "反馈（按偏差）"
+        signal = decision["signal"]
+        d_rows = [
+            ("周期", decision["cycle"]),
+            ("控制模式", mode_text),
+            ("命中规则", f"{decision['mode_rule']}：{decision['mode_reason']}"),
+            ("前馈方向", decision["direction"]),
+            ("信号是否可用", "是" if signal["available"] else f"否（{signal['reason']}）"),
+            ("当前功率 (kW)", signal["power_kw"]),
+            ("功率变化率 (kW/s)", signal["slope_kw_s"]),
+            ("预判功率缺口 (kW)", signal["predicted_delta_kw"]),
+            ("旁路动作", f"{decision['bypass']['action']}：{decision['bypass']['reason']}"),
+            ("负荷动作", f"目标 {decision['load']['target_mw']} MW（修正 {decision['load']['trim_mw']}，{decision['load']['reason']}）"),
+        ]
+        body += _table("最近控制决策", d_rows)
+        trace_rows = [
+            (item["rule"], f"{'命中' if item['hit'] else '—'}｜{item['note']}")
+            for item in decision["rules"]
+        ]
+        body += _table("规则求值轨迹（自上而下，取首条命中）", trace_rows)
+    return _shell("蒸汽控制台", body)
+
+
 def _alarm_page(platform: Platform) -> str:
     """告警页：闩锁、历史与升级等级。"""
 
@@ -151,6 +198,7 @@ _RENDERERS = {
     "/": _mirror_page,
     "/receiver": _receiver_page,
     "/salt": _salt_page,
+    "/steam": _steam_page,
     "/alarms": _alarm_page,
 }
 

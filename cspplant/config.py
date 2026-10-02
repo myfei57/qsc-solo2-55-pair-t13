@@ -221,23 +221,50 @@ class SaltLimits:
 
 @dataclass(frozen=True)
 class SteamLimits:
-    """蒸汽压力带、旁路提前量与汽机负荷约束。"""
+    """蒸汽压力带、旁路提前量与汽机负荷约束。
+
+    前馈（按吸热器功率变化抢先动作）相关参数：
+
+    ``ff_power_lead_s``        把吸热器功率变化率外推多少秒，得到预判功率缺口；
+    ``ff_min_delta_kw``        预判缺口达到该幅值才允许进入前馈（死区）；
+    ``ff_release_delta_kw``    前馈退出阈值，必须小于进入阈值形成回差；
+    ``ff_signal_max_age_s``    前馈信号超过该时长未刷新即判缺失，退回反馈；
+    ``ff_bypass_open_band``    反馈兜底：压力超过 目标+倍数×带宽 才按偏差开旁路；
+    ``ff_bypass_close_band``   压力回到 目标−倍数×带宽 才允许关旁路（回差）。
+    """
 
     pressure_target_mpa: float
     pressure_band_mpa: float
     bypass_lead_s: float
     load_max_mw: float
     load_rate_mw_s: float
+    ff_power_lead_s: float
+    ff_min_delta_kw: float
+    ff_release_delta_kw: float
+    ff_signal_max_age_s: float
+    ff_bypass_open_band: float
+    ff_bypass_close_band: float
 
     @classmethod
     def from_mapping(cls, section: Mapping[str, Any]) -> "SteamLimits":
-        return cls(
+        limits = cls(
             pressure_target_mpa=_number(section, "pressure_target_mpa", minimum=0.1),
             pressure_band_mpa=_number(section, "pressure_band_mpa", minimum=0.01),
             bypass_lead_s=_number(section, "bypass_lead_s", minimum=0.0),
             load_max_mw=_number(section, "load_max_mw", minimum=1.0),
             load_rate_mw_s=_number(section, "load_rate_mw_s", minimum=0.01),
+            ff_power_lead_s=_number(section, "ff_power_lead_s", minimum=0.0),
+            ff_min_delta_kw=_number(section, "ff_min_delta_kw", minimum=0.0),
+            ff_release_delta_kw=_number(section, "ff_release_delta_kw", minimum=0.0),
+            ff_signal_max_age_s=_number(section, "ff_signal_max_age_s", minimum=1.0),
+            ff_bypass_open_band=_number(section, "ff_bypass_open_band", minimum=0.0),
+            ff_bypass_close_band=_number(section, "ff_bypass_close_band", minimum=0.0),
         )
+        if limits.ff_release_delta_kw >= limits.ff_min_delta_kw:
+            raise ConfigError("前馈退出阈值必须小于进入阈值（回差）", component="config")
+        if limits.ff_bypass_close_band >= limits.ff_bypass_open_band:
+            raise ConfigError("旁路关闭回差必须小于开启阈值", component="config")
+        return limits
 
     def settled(self, pressure_mpa: float) -> bool:
         """蒸汽压力是否进入目标带。"""
@@ -348,7 +375,9 @@ def default_config() -> PlatformConfig:
         field=FieldLimits(320.0, 6.0, 12, 6.0),
         receiver=ReceiverLimits(600.0, 620.0, 720.0, 42.0, 20.0, 8.0, 22.0),
         salt=SaltLimits(18.0, 96.0, 1.4, 15.0, 58.0, 9.0, 2.5, 3.4),
-        steam=SteamLimits(12.0, 0.8, 6.0, 30.0, 1.0),
+        steam=SteamLimits(
+            12.0, 0.8, 6.0, 30.0, 1.0, 8.0, 6000.0, 2500.0, 120.0, 2.0, 0.5
+        ),
         wash=WashLimits(90.0, 26.0, 4.0, 9.0),
         alarm=AlarmLimits(5.0, 120.0),
     )
@@ -405,6 +434,12 @@ def config_to_mapping(cfg: PlatformConfig) -> dict:
                 "bypass_lead_s": cfg.steam.bypass_lead_s,
                 "load_max_mw": cfg.steam.load_max_mw,
                 "load_rate_mw_s": cfg.steam.load_rate_mw_s,
+                "ff_power_lead_s": cfg.steam.ff_power_lead_s,
+                "ff_min_delta_kw": cfg.steam.ff_min_delta_kw,
+                "ff_release_delta_kw": cfg.steam.ff_release_delta_kw,
+                "ff_signal_max_age_s": cfg.steam.ff_signal_max_age_s,
+                "ff_bypass_open_band": cfg.steam.ff_bypass_open_band,
+                "ff_bypass_close_band": cfg.steam.ff_bypass_close_band,
             },
             "wash": {
                 "wash_duration_s": cfg.wash.wash_duration_s,

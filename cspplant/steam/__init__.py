@@ -8,17 +8,25 @@
 from __future__ import annotations
 
 from .bypass import BypassValve
+from .feedforward import PowerSignal, PowerSignalTracker
 from .pressure import SteamPressure
 from .snapshot import SteamSnapshot
 from .system import STEAM_ENTHALPY_KJ_KG, SteamSystem
+from .supervisor import FEEDBACK, FEEDFORWARD, ControlDecision, SteamSupervisor
 from .turbine import Turbine, TurbineReport
 from .turbine_load import LoadRamp
 
 __all__ = [
     "BypassValve",
+    "PowerSignal",
+    "PowerSignalTracker",
     "SteamPressure",
     "SteamSnapshot",
     "SteamSystem",
+    "SteamSupervisor",
+    "ControlDecision",
+    "FEEDBACK",
+    "FEEDFORWARD",
     "Turbine",
     "TurbineReport",
     "LoadRamp",

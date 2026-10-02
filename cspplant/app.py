@@ -182,6 +182,7 @@ class Platform:
 
         self._cycles = 0
         self._operations = 0
+        self._receiver_power_available = True
         self._lock = threading.RLock()
         self._register_namespaces()
         self._restore()
@@ -554,6 +555,22 @@ class Platform:
         with self._lock:
             return self.salt.disturb(heat_fraction)
 
+    def set_feedforward_available(self, available: bool) -> dict:
+        """登记吸热器功率前馈信号是否在线。
+
+        置为缺失后，下一控制周期自动退回压力反馈（部分失败，不停机），恢复后
+        信号重新建立历史，前馈可再次投入。
+        """
+
+        with self._lock:
+            self._receiver_power_available = bool(available)
+            effective = self.steam.signal_tracker.set_available(bool(available))
+            return {
+                "feedforward_available": effective,
+                "mode": self.steam.supervisor.mode,
+                "missing": self.steam.signal_tracker.missing_count(),
+            }
+
     # ---- 控制循环 -----------------------------------------------------
 
     def cycle(self, dt: float = 1.0) -> dict:
@@ -581,8 +598,16 @@ class Platform:
                     "skipped": "not_admitted",
                 }
             load_target_mw = self.config.steam.load_max_mw * dispatch_pct / 100.0
-            self.steam.track_load(load_target_mw)
-            steam_report = self.steam.update(power_kw, dt)
+            admitted = self.receiver.header.state() == "admitted"
+            steam_report = self.steam.update(
+                power_kw,
+                dt,
+                now=moment,
+                dispatch_target_mw=load_target_mw,
+                online=admitted and self.steam.turbine.main_stop_open(),
+                feedforward_available=self._receiver_power_available,
+            )
+            self._record_control_decision(steam_report["decision"], steam_report["executed"])
             alarms = self._evaluate_alarms(moment)
             self.trend.append("receiver_temperature", moment, self.receiver.output_temperature_c())
             self.trend.append("salt_flow_kg_s", moment, self.salt.flow_kg_s())
@@ -595,9 +620,52 @@ class Platform:
                 "heat": heat,
                 "steam": steam_report,
                 "dispatch_pct": round(dispatch_pct, 3),
+                "control_decision": steam_report["decision"],
                 "alarms": [event.as_dict() for event in alarms],
                 "state": self.receiver.state(),
             }
+
+    def _record_control_decision(self, decision: dict, executed: dict) -> None:
+        """把本轮控制决策落审计并投总线，控制台据此逐轮回放"为什么这么开"。
+
+        决策只来自 :class:`~cspplant.steam.supervisor.SteamSupervisor` 的同一产物：
+        这里只发布，不重新判定，保证展示、执行、审计三者完全一致。
+        """
+
+        signal = decision["signal"]
+        mode = decision["mode"]
+        valve = decision["bypass"]
+        load = decision["load"]
+        severity = "warning" if decision["mode_rule"] == "signal_missing" else "notice"
+        self.bus.publish(
+            Event.of(
+                "steam",
+                "steam",
+                "steam_control_decision",
+                asset="turbine",
+                severity=severity,
+                message=(
+                    f"第 {decision['cycle']} 周期 {mode}：旁路 {valve['action']}（{valve['reason']}），"
+                    f"负荷目标 {load['target_mw']} MW"
+                ),
+                cycle=decision["cycle"],
+                mode=mode,
+                mode_rule=decision["mode_rule"],
+                mode_reason=decision["mode_reason"],
+                direction=decision["direction"],
+                bypass_action=valve["action"],
+                bypass_reason=valve["reason"],
+                load_target_mw=load["target_mw"],
+                load_base_mw=load["base_mw"],
+                load_trim_mw=load["trim_mw"],
+                load_reason=load["reason"],
+                pressure_mpa=decision["pressure_mpa"],
+                signal_available=signal["available"],
+                signal_reason=signal["reason"],
+                predicted_delta_kw=signal["predicted_delta_kw"],
+                slope_kw_s=signal["slope_kw_s"],
+            )
+        )
 
     def _signals(self) -> dict:
         """汇总告警判定需要的现场信号。"""
